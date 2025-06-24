@@ -1,0 +1,158 @@
+Setup and Installation Guide
+This guide will walk you through setting up the complete infrastructure and CI/CD pipeline from scratch on AWS.
+
+Prerequisites
+An AWS account with configured AWS CLI and access credentials.
+A GoDaddy or similar account for custom domain management.
+A Cloudflare account for SSL certificate configuration.
+Git installed on your local machine.
+A private key file (e.g., .pem file) from your AWS account for SSH access to VMs.
+Part 1: Infrastructure as Code (IaC) with Terraform
+Step 1: Set up a Central VM for Terraform and Kubectl
+Launch an EC2 Instance: Create a new EC2 instance on AWS (e.g., Ubuntu 24.04 LTS, instance type T2.Medium).
+Configure Security Group: Ensure your Security Group allows inbound SSH traffic (port 22) from your IP address.
+SSH into the VM: Connect to the instance using its public IP and your private key file.
+Update and Install Tools:
+Bash
+
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y curl unzip
+Step 2: Install AWS CLI and Authenticate
+Install AWS CLI:
+Bash
+
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+rm -rf aws awscliv2.zip
+Configure AWS CLI: Run aws configure and provide your AWS Access Key, Secret Access Key, and the region where you want to deploy (e.g., ap-south-1 as in the video).
+Bash
+
+aws configure
+# Follow the prompts to enter your AWS Access Key ID, Secret Access Key, etc.
+Step 3: Install Terraform
+Install Terraform using snap:
+Bash
+
+sudo snap install terraform --classic
+Verify installation:
+Bash
+
+terraform --version
+Step 4: Get Terraform Scripts and Provision EKS Cluster
+Clone the Terraform repository: Get the IaC scripts from your GitHub repository.
+Bash
+
+git clone https://github.com/YOUR_GITHUB_USERNAME/eks-terraform-repo.git
+cd eks-terraform-repo
+Modify Variables: Update the region, availability zones, and your private key name in main.tf and variables.tf.
+Run Terraform Commands: Execute the following commands to provision the EKS cluster and related resources.
+Bash
+
+terraform init        # Initializes the Terraform working directory.
+terraform plan        # Shows what resources will be created.
+terraform apply --auto-approve # Creates all AWS resources without a prompt.
+This step can take 5-10 minutes to complete.
+Part 2: Setting up Jenkins, SonarQube, and Nexus
+Step 5: Provision and Set up Servers for Jenkins, Nexus, and SonarQube
+Launch EC2 Instances: Create three new EC2 instances:
+Jenkins Master: Use a larger instance type like T2.Large for better performance.
+Nexus: Use T2.Medium.
+SonarQube: Use T2.Medium.
+Configure Security Groups: Ensure all three instances have the necessary ports open in their security groups:
+Jenkins: 8080 (for web UI)
+Nexus: 8081 (for web UI)
+SonarQube: 9000 (for web UI)
+Install Docker and Dockerize Tools:
+On the Nexus and SonarQube VMs: Install Docker.
+Bash
+
+sudo apt update
+sudo apt install -y docker.io
+sudo usermod -aG docker ubuntu # Add your user to the docker group
+newgrp docker # Apply group changes
+Run SonarQube Container:
+Bash
+
+sudo docker run -d --name sonar-server -p 9000:9000 sonarqube:lts-community
+Run Nexus Container:
+Bash
+
+sudo docker run -d --name Nexus3 -p 8081:8081 sonatype/nexus3:latest
+Get Nexus Admin Password:
+Bash
+
+sudo docker exec -it Nexus3 bash
+cat /nexus-data/admin.password
+# Copy the password and exit the container
+Install Jenkins:
+On the Jenkins Master VM: Install OpenJDK 17 and Jenkins.
+Bash
+
+sudo apt update
+sudo apt install -y openjdk-17-jdk
+# Follow the official Jenkins installation steps from jenkins.io
+Add Jenkins user to docker group (important for pipeline):
+Bash
+
+sudo usermod -aG docker jenkins
+sudo systemctl restart docker
+sudo systemctl restart jenkins
+Part 3: Configuring Jenkins Pipeline and Integrations
+Step 6: Configure Jenkins in the Web UI
+Access Jenkins: Go to http://JENKINS_VM_IP:8080 and complete the initial setup (unlock, install suggested plugins, create admin user).
+Install Plugins: Navigate to Manage Jenkins > Plugins > Available Plugins and install: SonarQube Scanner, Config File Provider, Maven Integration, Kubernetes, and Docker.
+Global Tool Configuration: Go to Manage Jenkins > Global Tool Configuration and configure the following tools, selecting Install automatically:
+JDK: Name: jdk17, Version: 17.0.x
+Maven: Name: Maven3, Version: 3.x
+SonarQube Scanner: Name: sonar-scanner, latest version
+Docker: Name: Docker, latest version
+Add Credentials:
+SonarQube Token: Go to Manage Jenkins > Credentials > Global > Add Credentials. Kind: Secret text. Secret: Paste your SonarQube token. ID: sonar-token.
+Nexus Credentials: Go to Manage Jenkins > Managed files > Add new config > Maven settings. Provide a file ID (e.g., settings-maven) and add the Nexus credentials in the XML file.
+Configure System Integrations: Go to Manage Jenkins > Configure System:
+SonarQube Servers: Add a new server. Name: SonarServer, URL: http://SONARQUBE_VM_IP:9000, and select your sonar-token credential.
+Kubernetes Cloud: (Optional, but useful for agents) Configure Kubernetes.
+Step 7: Configure Kubectl and Kubernetes Access
+Install Kubectl: On your central VM (where Terraform is installed), install Kubectl.
+Bash
+
+sudo snap install kubectl --classic
+Connect to EKS Cluster: Run the following command to update your kubeconfig file and authenticate with the EKS cluster created by Terraform.
+Bash
+
+aws eks update-kubeconfig --region YOUR_AWS_REGION --name devopshack-cluster
+Verify Connection:
+Bash
+
+kubectl get nodes # Should now show your worker nodes.
+Step 8: Set up Kubernetes RBAC for Deployment
+Create Namespace:
+Bash
+
+kubectl create namespace web-apps
+Create Service Account, Role, and Role Binding: Apply your YAML files (e.g., sa.yaml, role.yaml, rolebinding.yaml) to create a dedicated service account and grant it permissions to deploy resources in the web-apps namespace.
+Bash
+
+kubectl apply -f sa.yaml -n web-apps
+kubectl apply -f role.yaml -n web-apps
+kubectl apply -f rolebinding.yaml -n web-apps
+Create and Retrieve Service Account Token: Create a secret for your service account and retrieve the token. This token is crucial for Jenkins to authenticate with the Kubernetes API.
+Bash
+
+# Command to create secret and get token
+kubectl describe secret your-secret-name -n web-apps | grep token:
+Add Kubernetes Token to Jenkins: Go to Manage Jenkins > Credentials > Global > Add Credentials. Kind: Secret text. Secret: Paste the token. ID: k8s-token.
+Step 9: Create and Run the Jenkins Pipeline Job
+Create New Jenkins Job: In Jenkins, create a new Pipeline job.
+Configure Pipeline: In the "Pipeline" section, select "Pipeline script" and paste your Jenkinsfile.
+Jenkinsfile Content: Your Jenkinsfile will define all stages, from Maven build to deployment using kubectl apply and the k8s-token.
+
+---------------------------------------------------
+Important Considerations
+AWS EC2 Costs: This project utilizes multiple AWS EC2 instances (e.g., T2.Medium, T2.Large) and an EKS cluster, which are not part of the AWS Free Tier for continuous usage. This project will incur charges on your AWS account. Monitor your AWS billing dashboard and terminate all resources when not in use to avoid unexpected costs.
+AWS Credentials: The setup requires an AWS Access Key and Secret Access Key configured via aws configure on your central VM. Use a dedicated IAM user with limited permissions in a production environment.
+Security Groups: You must ensure that the Security Groups for your VMs and EKS worker nodes have the necessary inbound ports open for Jenkins (8080), SonarQube (9000), Nexus (8081), and your application's external Load Balancer (e.g., 80/443 for web traffic).
+Pipeline is the Core: The multi-tier application is a demonstration vehicle. The primary focus and achievement of this project is the end-to-end automation and orchestration of the CI/CD and deployment process across multiple tools and services.
+Temporary Setup: The Nexus and SonarQube containers use a non-persistent database in this setup, which is suitable for demonstration but not for production environments.
