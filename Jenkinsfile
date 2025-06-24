@@ -3,8 +3,11 @@ pipeline {
     agent any
 
     tools {
-        nodejs 'nodejs-10'
+        maven 'maven3'
         
+    }
+    environment{
+        SCANNER_HOME = tool 'sonar-scanner'
     }
 
     stages {
@@ -15,43 +18,104 @@ pipeline {
             }
         }
 
-        stage('Install Dependencies') {
+        stage('Compile') {
             steps {
-                echo 'Installing Node.js dependencies...'
-                sh 'npm install'
+                sh 'mvn compile'
             }
         }
-
+        stage('Test') {
+            steps {
+                sh 'mvn test -DskipTests=true'
+            }
+        }
+        
         stage("OWASP Dependency Check"){
             steps{
                 dependencyCheck additionalArguments: '--scan ./ --format HTML ', odcInstallation: 'DP'
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
-      
 
-        stage('Docker Build and Push Image') {
+        stage("Trivy FS Scan"){
+            steps{
+                sh "trivy fs --formattable -o fs-report.html ."
+            }
+        }
+
+        stage('SonarQube Analysis') {
             steps {
-                echo 'Building and pushing Docker image...'
-                script {
-                    withDockerRegistry(toolName: 'docker') {
-                        sh "docker build -t demonodejs ."
-                        sh "docker tag demonodejs username/nodejs:latest ."
-                        sh "docker push username/nodejs:latest"
-                    }
+                withSOnarQubeEnv('sonar'){
+                    sh " $SCANNER_HOME/bin/sonarscanner -Dsonar.projectName=Multitier -Dsonar.projectKey=Multitier -Dsonar.java.binaries=target"
                 }
             }
         }
 
-        stage('Deployment') {
+        stage("Build"){
+            steps{
+                sh "mvn package -DskipTests=true"
+            }
+        }
+
+        stage("Publish To Nexus"){
+            steps{
+                withMaven(globalMavenSettingsConfig:'settings-maven',jdk:''. maven:'maven3' , mavenSettingsConfig:'traceability:true){
+                          sh "mvn deploy -DskipTests=true"
+            }
+        }
+
+        stage('Docker Build Image') {
             steps {
-                echo 'Deploying application in Docker container...'
-                script {
-                    script {
-                    withDockerRegistry(toolName: 'docker') {
-                        sh "docker run -d --name demonodejs -p 8081:8081 username/nodejs:latest"
-                    }
-                }
+                   script {
+                       withDockerRegistry(credentialsId: 'b289dc43-2ede-4bd0-95e8-75ca26100d8d', toolName: 'docker') { // Generated using syntax pipeline generator tool
+                            sh "docker build -t username/bankapp:latest"
+                       }
+                   } 
+            }
+        }
+
+        stage("Trivy Image Scan"){
+            steps{
+                sh "trivy image --formattable -o fs-report.html username/bankapp:latest"
+            }
+        }
+
+        stage('Docker Push Image') {
+            steps {
+                   script {
+                       withDockerRegistry(credentialsId: 'b289dc43-2ede-4bd0-95e8-75ca26100d8d', toolName: 'docker') { // Generated using syntax pipeline generator tool
+                            sh "docker push username/bankapp:latest"
+                       }
+                   } 
+            }
+        }
+
+
+
+
+
+        stage('Deploy To Kubernetes') {
+            steps {
+                   script {
+                       withKubeConfig(caCertificate: '',clusterName:'devopsshack-cluster',contextName:'',credentialsid:'k8-token',namespace:'webapps', restrictKubeConfigAccess:flase, serverUrl:"https://*************************"){
+                        sh "kubectl apply -f ds.yml -n webapps"
+                        sleep 30
+                       }
+                       
+                   } 
+            }
+        }
+
+
+        stage('Verify Deployment') {
+            steps {
+                   script {
+                       withKubeConfig(caCertificate: '',clusterName:'devopsshack-cluster',contextName:'',credentialsid:'k8-token',namespace:'webapps', restrictKubeConfigAccess:flase, serverUrl:"https://*************************"){
+                        sh "kubectl get pods -n webapps"
+                        sh "kubectl get svc -n webapps"
+                        sleep 30
+                       }
+                       
+                   } 
             }
         }
     }
